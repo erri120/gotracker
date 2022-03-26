@@ -2,13 +2,14 @@ package main
 
 import (
 	"context"
-	"erri120/gotracker"
-	"erri120/gotracker/protocol"
 	"flag"
 	"fmt"
 	"net"
 	"os"
 	"time"
+
+	"erri120/gotracker"
+	"erri120/gotracker/protocol"
 
 	"github.com/anacrolix/torrent/tracker"
 	"github.com/anacrolix/torrent/tracker/http"

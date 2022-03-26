@@ -1,9 +1,8 @@
-package gotracker
+package server
 
 import (
 	"bytes"
 	"fmt"
-	"math"
 	"math/rand"
 	"net"
 	"time"
@@ -23,59 +22,6 @@ const (
 	defaultPeerCount     = 10
 )
 
-type Torrent struct {
-	Leechers int32
-	Seeders  int32
-	Peers    []protocol.PeerAddr
-}
-
-func (torrent Torrent) AddPeer(addr *net.UDPAddr) {
-	var exists bool
-	for _, peer := range torrent.Peers {
-		// TODO: allow same IP but different ports?
-		if peer.Ip.Equal(addr.IP) {
-			exists = true
-			break
-		}
-	}
-
-	if exists {
-		return
-	}
-
-	torrent.Peers = append(torrent.Peers, protocol.PeerAddr{
-		Ip:   addr.IP,
-		Port: uint16(addr.Port),
-	})
-}
-
-func (torrent Torrent) GetPeers(maxPeers int32) []protocol.PeerAddr {
-	if maxPeers == -1 {
-		maxPeers = defaultPeerCount
-	}
-
-	if len(torrent.Peers) < int(maxPeers) {
-		return torrent.Peers
-	}
-
-	if maxPeers > maxPeerCount {
-		return torrent.Peers[:maxPeerCount]
-	}
-
-	return torrent.Peers[:maxPeers]
-}
-
-type ConnectedClient struct {
-	ConnectionId protocol.ConnectionId
-	TimeIdIssued time.Time
-}
-
-func (connection ConnectedClient) IsValid() bool {
-	now := time.Now()
-	diff := now.Sub(connection.TimeIdIssued)
-	return diff < connectionIdLifetime
-}
-
 type Server struct {
 	Logger           *zap.Logger
 	Conn             *net.UDPConn
@@ -84,7 +30,7 @@ type Server struct {
 }
 
 func (server *Server) Respond(remoteAddr *net.UDPAddr, bufSize uint32, responseHeader protocol.ResponseHeader, parts ...interface{}) error {
-	bytes, err := marshal(bufSize, append([]interface{}{responseHeader}, parts...)...)
+	bytes, err := protocol.Marshal(bufSize, append([]interface{}{responseHeader}, parts...)...)
 	if err != nil {
 		return err
 	}
@@ -165,48 +111,6 @@ func (server *Server) StartCleanup(sleepTime time.Duration) {
 	}
 }
 
-func extractExtensionData(reader *bytes.Reader, logger *zap.Logger) (string, error) {
-	var optionType uint8
-	if err := unmarshal(reader, &optionType); err != nil {
-		logger.Error("Unable to unmarshal BEP 41 option type", zap.Error(err))
-		return "", err
-	}
-
-	option := protocol.BEP41OptionType(optionType)
-
-	switch option {
-	case protocol.BEP41OptionTypeEndOfOptions:
-		return "", nil
-	case protocol.BEP41OptionTypeNOP:
-		return "", nil
-	case protocol.BEP41OptionTypeURLData:
-		var length uint8
-		if err := unmarshal(reader, &length); err != nil {
-			logger.Error("Unable to unmarshal BEP 41 length", zap.Error(err))
-			return "", err
-		}
-
-		if length == 0 {
-			return "", nil
-		}
-
-		if length == math.MaxUint8 {
-			// TODO: BEP 41 says you can go around this limit by appending multiple URLData fields to the request
-		}
-
-		urlData := make([]byte, length)
-		if _, err := reader.Read(urlData); err != nil {
-			logger.Error("Unable to read BEP 41 URL data", zap.Error(err))
-			return "", err
-		}
-
-		urlPart := string(urlData)
-		return urlPart, nil
-	default:
-		return "", fmt.Errorf("Unknown BEP 41 option type %d", optionType)
-	}
-}
-
 func (server *Server) Listen(addr *net.UDPAddr) (err error) {
 	if server.Conn != nil {
 		return fmt.Errorf("Server is already listening!")
@@ -246,7 +150,7 @@ func (server *Server) Listen(addr *net.UDPAddr) (err error) {
 		reader := bytes.NewReader(data[:n])
 
 		var requestHeader protocol.RequestHeader
-		if err = unmarshal(reader, &requestHeader); err != nil {
+		if err = protocol.Unmarshal(reader, &requestHeader); err != nil {
 			server.Logger.Error("Unable to unmarshal request header", zap.Error(err))
 			continue
 		}
@@ -305,14 +209,14 @@ func (server *Server) Listen(addr *net.UDPAddr) (err error) {
 			}
 
 			var announceRequest protocol.IPv4AnnounceRequest
-			if err = unmarshal(reader, &announceRequest); err != nil {
+			if err = protocol.Unmarshal(reader, &announceRequest); err != nil {
 				logger.Error("Unable to unmarshal IPv4 announce request", zap.Error(err))
 				continue
 			}
 
 			if n > int(protocol.SizeOfRequestHeader+protocol.SizeOfIPv4AnnounceRequest) {
 				// check for BEP 41 as an extension
-				url, err := extractExtensionData(reader, logger)
+				url, err := protocol.ExtractExtensionData(reader)
 				if err != nil {
 					logger.Error("Unable to extract extension data", zap.Error(err))
 					continue
