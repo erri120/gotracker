@@ -12,8 +12,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// https://github.com/anacrolix/torrent/blob/master/tracker/udp-server_test.go
-
 const (
 	blockSize            = 1024
 	announceInterval     = 900

@@ -31,6 +31,7 @@ func ExtractExtensionData(reader *bytes.Reader) (string, error) {
 
 		if length == math.MaxUint8 {
 			// TODO: BEP 41 says you can go around this limit by appending multiple URLData fields to the request
+			return "", nil
 		}
 
 		urlData := make([]byte, length)

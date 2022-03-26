@@ -11,7 +11,7 @@ type Torrent struct {
 	Peers    []protocol.PeerAddr
 }
 
-func (torrent Torrent) AddPeer(addr *net.UDPAddr) {
+func (torrent *Torrent) AddPeer(addr *net.UDPAddr) {
 	var exists bool
 	for _, peer := range torrent.Peers {
 		// TODO: allow same IP but different ports?
