@@ -16,24 +16,26 @@ const (
 	blockSize            = 1024
 	announceInterval     = 900
 	connectionIdLifetime = time.Minute * 2
-	maxPeerCount         = 50
-	defaultPeerCount     = 10
 )
+
+type GetTorrentFunc func(infoHash protocol.InfoHash) (Torrent, error)
 
 type Server struct {
 	Logger           *zap.Logger
-	Conn             *net.UDPConn
 	ConnectedClients map[protocol.ConnectionId]ConnectedClient
-	Torrents         map[protocol.InfoHash]Torrent
+	GetTorrent       GetTorrentFunc
+
+	conn *net.UDPConn
 }
 
+// Responds to a client with the given data.
 func (server *Server) Respond(remoteAddr *net.UDPAddr, bufSize uint32, responseHeader protocol.ResponseHeader, parts ...interface{}) error {
 	bytes, err := protocol.Marshal(bufSize, append([]interface{}{responseHeader}, parts...)...)
 	if err != nil {
 		return err
 	}
 
-	n, err := server.Conn.WriteToUDP(bytes, remoteAddr)
+	n, err := server.conn.WriteToUDP(bytes, remoteAddr)
 	if err != nil {
 		return err
 	}
@@ -45,6 +47,7 @@ func (server *Server) Respond(remoteAddr *net.UDPAddr, bufSize uint32, responseH
 	return nil
 }
 
+// Responds to a client with an error message.
 func (server *Server) RespondWithError(remoteAddr *net.UDPAddr, transationId protocol.TransactionId, message string) error {
 	b := []byte(message)
 	return server.Respond(remoteAddr, protocol.SizeOfResponseHeader+uint32(len(b)), protocol.ResponseHeader{
@@ -53,16 +56,18 @@ func (server *Server) RespondWithError(remoteAddr *net.UDPAddr, transationId pro
 	}, b)
 }
 
+// Closes the underlying connection if it is open.
 func (server *Server) Close() error {
-	if server.Conn == nil {
+	if server.conn == nil {
 		return nil
 	}
 
-	err := server.Conn.Close()
-	server.Conn = nil
+	err := server.conn.Close()
+	server.conn = nil
 	return err
 }
 
+// Registers a new connection and returns the connection id.
 func (server *Server) RegisterNewConnection() protocol.ConnectionId {
 	// connection ids should not be guessable by the client, can look into crypto/rand
 	connectionId := protocol.ConnectionId(rand.Int63())
@@ -75,15 +80,18 @@ func (server *Server) RegisterNewConnection() protocol.ConnectionId {
 	return connectionId
 }
 
+// Unregisters a connection.
 func (server *Server) UnregisterConnection(connectionId protocol.ConnectionId) {
 	delete(server.ConnectedClients, connectionId)
 }
 
+// Checks if the given connection id is valid.
 func (server *Server) IsConnected(connectionId protocol.ConnectionId) bool {
 	_, ok := server.ConnectedClients[connectionId]
 	return ok
 }
 
+// Checks if the connection of the given connection id is valid.
 func (server *Server) IsValidConnection(connectionId protocol.ConnectionId) bool {
 	connection, ok := server.ConnectedClients[connectionId]
 	if !ok {
@@ -93,6 +101,7 @@ func (server *Server) IsValidConnection(connectionId protocol.ConnectionId) bool
 	return connection.IsValid()
 }
 
+// Starts the cleanup routine which removes old connections.
 func (server *Server) StartCleanup(sleepTime time.Duration) {
 	for {
 		for _, connection := range server.ConnectedClients {
@@ -109,9 +118,18 @@ func (server *Server) StartCleanup(sleepTime time.Duration) {
 	}
 }
 
+// Starts the routine which handles incoming messages.
 func (server *Server) Listen(addr *net.UDPAddr) (err error) {
-	if server.Conn != nil {
+	if server.conn != nil {
 		return fmt.Errorf("Server is already listening!")
+	}
+
+	if server.Logger == nil {
+		server.Logger = zap.NewNop()
+	}
+
+	if server.GetTorrent == nil {
+		return fmt.Errorf("GetTorrent function is not set!")
 	}
 
 	// TODO: UDP over IPv4 vs IPv6, the network name has to be changed to "udp4" or "udp6"
@@ -121,7 +139,7 @@ func (server *Server) Listen(addr *net.UDPAddr) (err error) {
 		return
 	}
 
-	server.Conn = listener
+	server.conn = listener
 	// called in Server.Close()
 	// defer listener.Close()
 
@@ -198,7 +216,6 @@ func (server *Server) Listen(addr *net.UDPAddr) (err error) {
 			}
 
 			// TODO: IPv4/IPv6
-
 			if n < int(protocol.SizeOfRequestHeader+protocol.SizeOfIPv4AnnounceRequest) {
 				logger.Error("Client send not enough data for an announce request",
 					zap.Int("diff", n-int(protocol.SizeOfRequestHeader+protocol.SizeOfIPv4AnnounceRequest)),
@@ -224,19 +241,40 @@ func (server *Server) Listen(addr *net.UDPAddr) (err error) {
 				logger.Debug("Extracted extension data", zap.String("url", url))
 			}
 
-			torrent, ok := server.Torrents[announceRequest.InfoHash]
-			if !ok {
-				logger.Warn("Client tried to announce unknown torrent", zap.Binary("infoHash", announceRequest.InfoHash[:]))
+			torrent, err := server.GetTorrent(announceRequest.InfoHash)
+			if err != nil {
+				logger.Error("Unable to get torrent", zap.Error(err), zap.Binary("infoHash", announceRequest.InfoHash[:]))
+				continue
+			}
+
+			peers, err := torrent.GetPeers(announceRequest.NumWanted)
+			if err != nil {
+				logger.Error("Unable to get peers", zap.Error(err), zap.Binary("infoHash", announceRequest.InfoHash[:]))
+				continue
+			}
+
+			leechers, err := torrent.GetLeechers()
+			if err != nil {
+				logger.Error("Unable to get leechers", zap.Error(err), zap.Binary("infoHash", announceRequest.InfoHash[:]))
+				continue
+			}
+
+			seeders, err := torrent.GetSeeders()
+			if err != nil {
+				logger.Error("Unable to get seeders", zap.Error(err), zap.Binary("infoHash", announceRequest.InfoHash[:]))
+				continue
+			}
+
+			// add current client as peer
+			if err := torrent.AddPeer(remoteAddr); err != nil {
+				logger.Error("Unable to add peer", zap.Error(err), zap.Binary("infoHash", announceRequest.InfoHash[:]))
 				continue
 			}
 
 			// TODO: IPv4/IPv6
-			peers := protocol.IPv4Peers(torrent.GetPeers(announceRequest.NumWanted))
+			ipv4Peers := protocol.IPv4Peers(peers)
 
-			// add current client as peer
-			torrent.AddPeer(remoteAddr)
-
-			b, err := peers.MarshalBinary()
+			b, err := ipv4Peers.MarshalBinary()
 			if err != nil {
 				logger.Error("Unable to marshal IPv4 peers", zap.Error(err))
 				continue
@@ -247,8 +285,8 @@ func (server *Server) Listen(addr *net.UDPAddr) (err error) {
 				TransactionId: requestHeader.TransactionId,
 			}, protocol.IPv4AnnounceResponse{
 				Interval: announceInterval,
-				Leechers: torrent.Leechers,
-				Seeders:  torrent.Seeders,
+				Leechers: leechers,
+				Seeders:  seeders,
 			}, b)
 
 			if err != nil {
