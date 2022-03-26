@@ -25,7 +25,8 @@ type Server struct {
 	ConnectedClients map[protocol.ConnectionId]ConnectedClient
 	GetTorrent       GetTorrentFunc
 
-	conn *net.UDPConn
+	conn   *net.UDPConn
+	closed bool
 }
 
 // Responds to a client with the given data.
@@ -58,6 +59,12 @@ func (server *Server) RespondWithError(remoteAddr *net.UDPAddr, transationId pro
 
 // Closes the underlying connection if it is open.
 func (server *Server) Close() error {
+	if server.closed {
+		return fmt.Errorf("Server is already closed!")
+	}
+
+	server.closed = true
+
 	if server.conn == nil {
 		return nil
 	}
@@ -120,6 +127,10 @@ func (server *Server) StartCleanup(sleepTime time.Duration) {
 
 // Starts the routine which handles incoming messages.
 func (server *Server) Listen(addr *net.UDPAddr) (err error) {
+	if server.closed {
+		return fmt.Errorf("Server is closed!")
+	}
+
 	if server.conn != nil {
 		return fmt.Errorf("Server is already listening!")
 	}
@@ -145,169 +156,173 @@ func (server *Server) Listen(addr *net.UDPAddr) (err error) {
 
 	data := make([]byte, blockSize)
 	for {
+		if server.closed {
+			server.Logger.Info("Server closed, stopping listening")
+			return nil
+		}
+
 		n, remoteAddr, err := listener.ReadFromUDP(data)
+
+		if err != nil {
+			server.Logger.Error("Unable to read package", zap.Error(err))
+			continue
+		}
 
 		if n < int(protocol.SizeOfRequestHeader) {
 			server.Logger.Error("Received package is too small", zap.Int("bytes", n))
 			continue
 		}
 
-		if err != nil {
-			server.Logger.Error("Unable to read next package", zap.Error(err))
-			continue
-		}
-
-		// TODO: handle each request in a goroutine?
-		// copying the slice might not be the best approach
-		// we could do the switch statement here or in the HandleRequest function
-		// performance vs memory usage, I guess
-		// go server.HandleRequest(remoteAddr, data[:n])
-
 		reader := bytes.NewReader(data[:n])
+		go server.handleRequest(reader, remoteAddr)
+	}
+}
 
-		var requestHeader protocol.RequestHeader
-		if err = protocol.Unmarshal(reader, &requestHeader); err != nil {
-			server.Logger.Error("Unable to unmarshal request header", zap.Error(err))
-			continue
+func (server *Server) handleRequest(reader *bytes.Reader, remoteAddr *net.UDPAddr) {
+	n := reader.Len()
+
+	var requestHeader protocol.RequestHeader
+	if err := protocol.Unmarshal(reader, &requestHeader); err != nil {
+		server.Logger.Error("Unable to unmarshal request header", zap.Error(err))
+		return
+	}
+
+	logger := server.Logger.With(
+		zap.String("remote", remoteAddr.String()),
+		zap.Int32("action", int32(requestHeader.Action)),
+		zap.Int64("connectionId", int64(requestHeader.ConnectionId)),
+	)
+
+	logger.Debug("Handling request from client", zap.Int("bytes", n))
+
+	switch requestHeader.Action {
+	case protocol.ActionConnect:
+		if n > int(protocol.SizeOfRequestHeader) {
+			logger.Warn("Client sent more data than expected for connect request", zap.Int("diff", n-int(protocol.SizeOfRequestHeader)))
 		}
 
-		logger := server.Logger.With(
-			zap.String("remote", remoteAddr.String()),
-			zap.Int32("action", int32(requestHeader.Action)),
-			zap.Int64("connectionId", int64(requestHeader.ConnectionId)),
-		)
+		if requestHeader.ConnectionId != protocol.ConnectRequestMagic {
+			logger.Error("Client used wrong connection id for connect request")
+			return
+		}
 
-		logger.Debug("Handling request from client", zap.Int("bytes", n))
+		// TODO: maybe check if the Client is already connected based on the remote address
 
-		switch requestHeader.Action {
-		case protocol.ActionConnect:
-			if n > int(protocol.SizeOfRequestHeader) {
-				logger.Warn("Client sent more data than expected for connect request", zap.Int("diff", n-int(protocol.SizeOfRequestHeader)))
-			}
+		connectionId := server.RegisterNewConnection()
 
-			if requestHeader.ConnectionId != protocol.ConnectRequestMagic {
-				logger.Error("Client used wrong connection id for connect request")
-				continue
-			}
+		err := server.Respond(remoteAddr, protocol.SizeOfConnectResponse, protocol.ResponseHeader{
+			Action:        protocol.ActionConnect,
+			TransactionId: requestHeader.TransactionId,
+		}, connectionId)
 
-			// TODO: maybe check if the Client is already connected based on the remote address
+		if err != nil {
+			logger.Error("Unable to respond to client with connect response", zap.Error(err))
+			return
+		}
+	case protocol.ActionAnnounce:
+		if !server.IsConnected(requestHeader.ConnectionId) {
+			logger.Warn("Client tried to announce with unregistered connection id")
+			return
+		}
 
-			connectionId := server.RegisterNewConnection()
+		if !server.IsValidConnection(requestHeader.ConnectionId) {
+			logger.Warn("Client tired to use an expired connection id")
+			server.UnregisterConnection(requestHeader.ConnectionId)
+			return
+		}
 
-			err = server.Respond(remoteAddr, protocol.SizeOfConnectResponse, protocol.ResponseHeader{
-				Action:        protocol.ActionConnect,
-				TransactionId: requestHeader.TransactionId,
-			}, connectionId)
+		// TODO: IPv4/IPv6
+		if n < int(protocol.SizeOfRequestHeader+protocol.SizeOfIPv4AnnounceRequest) {
+			logger.Error("Client send not enough data for an announce request",
+				zap.Int("diff", n-int(protocol.SizeOfRequestHeader+protocol.SizeOfIPv4AnnounceRequest)),
+			)
+			return
+		}
 
+		var announceRequest protocol.IPv4AnnounceRequest
+		if err := protocol.Unmarshal(reader, &announceRequest); err != nil {
+			logger.Error("Unable to unmarshal IPv4 announce request", zap.Error(err))
+			return
+		}
+
+		if n > int(protocol.SizeOfRequestHeader+protocol.SizeOfIPv4AnnounceRequest) {
+			// check for BEP 41 as an extension
+			url, err := protocol.ExtractExtensionData(reader)
 			if err != nil {
-				logger.Error("Unable to respond to client with connect response", zap.Error(err))
-				continue
-			}
-		case protocol.ActionAnnounce:
-			if !server.IsConnected(requestHeader.ConnectionId) {
-				logger.Warn("Client tried to announce with unregistered connection id")
-				continue
+				logger.Error("Unable to extract extension data", zap.Error(err))
+				return
 			}
 
-			if !server.IsValidConnection(requestHeader.ConnectionId) {
-				logger.Warn("Client tired to use an expired connection id")
-				server.UnregisterConnection(requestHeader.ConnectionId)
-				continue
-			}
+			// TODO: do something with the url
+			logger.Debug("Extracted extension data", zap.String("url", url))
+		}
 
-			// TODO: IPv4/IPv6
-			if n < int(protocol.SizeOfRequestHeader+protocol.SizeOfIPv4AnnounceRequest) {
-				logger.Error("Client send not enough data for an announce request",
-					zap.Int("diff", n-int(protocol.SizeOfRequestHeader+protocol.SizeOfIPv4AnnounceRequest)),
-				)
-				continue
-			}
+		torrent, err := server.GetTorrent(announceRequest.InfoHash)
+		if err != nil {
+			logger.Error("Unable to get torrent", zap.Error(err), zap.Binary("infoHash", announceRequest.InfoHash[:]))
+			return
+		}
 
-			var announceRequest protocol.IPv4AnnounceRequest
-			if err = protocol.Unmarshal(reader, &announceRequest); err != nil {
-				logger.Error("Unable to unmarshal IPv4 announce request", zap.Error(err))
-				continue
-			}
+		peers, err := torrent.GetPeers(announceRequest.NumWanted)
+		if err != nil {
+			logger.Error("Unable to get peers", zap.Error(err), zap.Binary("infoHash", announceRequest.InfoHash[:]))
+			return
+		}
 
-			if n > int(protocol.SizeOfRequestHeader+protocol.SizeOfIPv4AnnounceRequest) {
-				// check for BEP 41 as an extension
-				url, err := protocol.ExtractExtensionData(reader)
-				if err != nil {
-					logger.Error("Unable to extract extension data", zap.Error(err))
-					continue
-				}
+		leechers, err := torrent.GetLeechers()
+		if err != nil {
+			logger.Error("Unable to get leechers", zap.Error(err), zap.Binary("infoHash", announceRequest.InfoHash[:]))
+			return
+		}
 
-				// TODO: do something with the url
-				logger.Debug("Extracted extension data", zap.String("url", url))
-			}
+		seeders, err := torrent.GetSeeders()
+		if err != nil {
+			logger.Error("Unable to get seeders", zap.Error(err), zap.Binary("infoHash", announceRequest.InfoHash[:]))
+			return
+		}
 
-			torrent, err := server.GetTorrent(announceRequest.InfoHash)
-			if err != nil {
-				logger.Error("Unable to get torrent", zap.Error(err), zap.Binary("infoHash", announceRequest.InfoHash[:]))
-				continue
-			}
+		// add current client as peer
+		if err := torrent.AddPeer(remoteAddr); err != nil {
+			logger.Error("Unable to add peer", zap.Error(err), zap.Binary("infoHash", announceRequest.InfoHash[:]))
+			return
+		}
 
-			peers, err := torrent.GetPeers(announceRequest.NumWanted)
-			if err != nil {
-				logger.Error("Unable to get peers", zap.Error(err), zap.Binary("infoHash", announceRequest.InfoHash[:]))
-				continue
-			}
+		// TODO: IPv4/IPv6
+		ipv4Peers := protocol.IPv4Peers(peers)
 
-			leechers, err := torrent.GetLeechers()
-			if err != nil {
-				logger.Error("Unable to get leechers", zap.Error(err), zap.Binary("infoHash", announceRequest.InfoHash[:]))
-				continue
-			}
+		b, err := ipv4Peers.MarshalBinary()
+		if err != nil {
+			logger.Error("Unable to marshal IPv4 peers", zap.Error(err))
+			return
+		}
 
-			seeders, err := torrent.GetSeeders()
-			if err != nil {
-				logger.Error("Unable to get seeders", zap.Error(err), zap.Binary("infoHash", announceRequest.InfoHash[:]))
-				continue
-			}
+		err = server.Respond(remoteAddr, protocol.SizeOfIPv4AnnounceResponse+uint32(len(b)), protocol.ResponseHeader{
+			Action:        protocol.ActionAnnounce,
+			TransactionId: requestHeader.TransactionId,
+		}, protocol.IPv4AnnounceResponse{
+			Interval: announceInterval,
+			Leechers: leechers,
+			Seeders:  seeders,
+		}, b)
 
-			// add current client as peer
-			if err := torrent.AddPeer(remoteAddr); err != nil {
-				logger.Error("Unable to add peer", zap.Error(err), zap.Binary("infoHash", announceRequest.InfoHash[:]))
-				continue
-			}
+		if err != nil {
+			logger.Error("Unable to respond to client with announce response", zap.Error(err))
+			return
+		}
+	case protocol.ActionScrape:
+		// TODO: implement scraping
+		err := server.RespondWithError(remoteAddr, requestHeader.TransactionId, fmt.Sprintf("Unsupported"))
+		if err != nil {
+			logger.Error("Unable to respond to client with error", zap.Error(err))
+			return
+		}
+	default:
+		logger.Warn("Unknown action")
 
-			// TODO: IPv4/IPv6
-			ipv4Peers := protocol.IPv4Peers(peers)
-
-			b, err := ipv4Peers.MarshalBinary()
-			if err != nil {
-				logger.Error("Unable to marshal IPv4 peers", zap.Error(err))
-				continue
-			}
-
-			err = server.Respond(remoteAddr, protocol.SizeOfIPv4AnnounceResponse+uint32(len(b)), protocol.ResponseHeader{
-				Action:        protocol.ActionAnnounce,
-				TransactionId: requestHeader.TransactionId,
-			}, protocol.IPv4AnnounceResponse{
-				Interval: announceInterval,
-				Leechers: leechers,
-				Seeders:  seeders,
-			}, b)
-
-			if err != nil {
-				logger.Error("Unable to respond to client with announce response", zap.Error(err))
-				continue
-			}
-		case protocol.ActionScrape:
-			// TODO: implement scraping
-			err = server.RespondWithError(addr, requestHeader.TransactionId, fmt.Sprintf("Unsupported"))
-			if err != nil {
-				logger.Error("Unable to respond to client with error", zap.Error(err))
-				continue
-			}
-		default:
-			logger.Warn("Unknown action")
-
-			err = server.RespondWithError(addr, requestHeader.TransactionId, fmt.Sprintf("Unknown Action: %d", requestHeader.Action))
-			if err != nil {
-				logger.Error("Unable to respond to client with error", zap.Error(err))
-				continue
-			}
+		err := server.RespondWithError(remoteAddr, requestHeader.TransactionId, fmt.Sprintf("Unknown Action: %d", requestHeader.Action))
+		if err != nil {
+			logger.Error("Unable to respond to client with error", zap.Error(err))
+			return
 		}
 	}
 }

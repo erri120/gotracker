@@ -7,7 +7,7 @@ import (
 )
 
 type PeerAddr struct {
-	Ip   net.IP
+	IP   net.IP
 	Port uint16
 }
 
@@ -19,7 +19,7 @@ func (peers IPv4Peers) MarshalBinary() ([]byte, error) {
 	buf := bytes.NewBuffer(make([]byte, 0, len(peers)*(net.IPv4len+2)))
 
 	for _, peer := range peers {
-		ip := peer.Ip.To4()
+		ip := peer.IP.To4()
 
 		// skip this peer if the IP is not IPv4
 		if ip == nil {

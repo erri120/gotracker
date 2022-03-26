@@ -14,11 +14,11 @@ func TestIPv4PeerMarshalBinary(t *testing.T) {
 		{
 			peers: IPv4Peers{
 				{
-					Ip:   net.ParseIP("127.0.0.1"),
+					IP:   net.ParseIP("127.0.0.1"),
 					Port: uint16(8080),
 				},
 				{
-					Ip:   net.ParseIP("192.168.178.1"),
+					IP:   net.ParseIP("192.168.178.1"),
 					Port: uint16(8080),
 				},
 			},
