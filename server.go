@@ -3,6 +3,7 @@ package gotracker
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"math/rand"
 	"net"
 	"time"
@@ -164,36 +165,46 @@ func (server *Server) StartCleanup(sleepTime time.Duration) {
 	}
 }
 
-func extractExtensionData(reader *bytes.Reader, logger *zap.Logger) error {
+func extractExtensionData(reader *bytes.Reader, logger *zap.Logger) (string, error) {
 	var optionType uint8
 	if err := unmarshal(reader, &optionType); err != nil {
 		logger.Error("Unable to unmarshal BEP 41 option type", zap.Error(err))
-		return err
+		return "", err
 	}
 
-	switch optionType {
+	option := protocol.BEP41OptionType(optionType)
+
+	switch option {
 	case protocol.BEP41OptionTypeEndOfOptions:
-		return nil
+		return "", nil
 	case protocol.BEP41OptionTypeNOP:
-		return nil
+		return "", nil
 	case protocol.BEP41OptionTypeURLData:
 		var length uint8
 		if err := unmarshal(reader, &length); err != nil {
 			logger.Error("Unable to unmarshal BEP 41 length", zap.Error(err))
-			return err
+			return "", err
 		}
 
 		if length == 0 {
-			return fmt.Errorf("BEP 41 URL data length is 0")
+			return "", nil
 		}
 
-		urlData := make([]byte, 0, length)
+		if length == math.MaxUint8 {
+			// TODO: BEP 41 says you can go around this limit by appending multiple URLData fields to the request
+		}
+
+		urlData := make([]byte, length)
 		if _, err := reader.Read(urlData); err != nil {
 			logger.Error("Unable to read BEP 41 URL data", zap.Error(err))
-			return err
+			return "", err
 		}
+
+		urlPart := string(urlData)
+		return urlPart, nil
 	default:
-		return fmt.Errorf("Unknown BEP 41 option type %d", optionType)
+		return "", fmt.Errorf("Unknown BEP 41 option type %d", optionType)
+	}
 }
 
 func (server *Server) Listen(addr *net.UDPAddr) (err error) {
@@ -293,15 +304,22 @@ func (server *Server) Listen(addr *net.UDPAddr) (err error) {
 				continue
 			}
 
-			if n > int(protocol.SizeOfRequestHeader+protocol.SizeOfIPv4AnnounceRequest) {
-				// check for BEP 41 as an extension
-
-			}
-
 			var announceRequest protocol.IPv4AnnounceRequest
 			if err = unmarshal(reader, &announceRequest); err != nil {
 				logger.Error("Unable to unmarshal IPv4 announce request", zap.Error(err))
 				continue
+			}
+
+			if n > int(protocol.SizeOfRequestHeader+protocol.SizeOfIPv4AnnounceRequest) {
+				// check for BEP 41 as an extension
+				url, err := extractExtensionData(reader, logger)
+				if err != nil {
+					logger.Error("Unable to extract extension data", zap.Error(err))
+					continue
+				}
+
+				// TODO: do something with the url
+				logger.Debug("Extracted extension data", zap.String("url", url))
 			}
 
 			torrent, ok := server.Torrents[announceRequest.InfoHash]

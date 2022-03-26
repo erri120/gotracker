@@ -29,11 +29,11 @@ func run() error {
 
 	time.Sleep(time.Second * 2)
 
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 1; i++ {
 		go startClient(i)
 	}
 
-	time.Sleep(time.Second * 5)
+	time.Sleep(time.Second * 2)
 	return nil
 }
 
