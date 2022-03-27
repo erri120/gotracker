@@ -23,9 +23,12 @@ type GetTorrentFunc func(infoHash protocol.InfoHash) (Torrent, error)
 type IsBannedFunc func(remoteAddr *net.UDPAddr) bool
 
 type Server struct {
-	Logger         *zap.Logger
-	GetTorrent     GetTorrentFunc
-	IsClientBanned IsBannedFunc
+	Logger *zap.Logger // Logger to use
+
+	AnnounceUrlPath string // Announce url to use
+
+	GetTorrent     GetTorrentFunc // Function to get a torrent by its info hash
+	IsClientBanned IsBannedFunc   // Function to check if a client is banned
 
 	conn             *net.UDPConn
 	connectedClients map[protocol.ConnectionId]ConnectedClient
@@ -152,6 +155,8 @@ func (server *Server) Listen(addr *net.UDPAddr) (err error) {
 		}
 	}
 
+	// TODO: validate server.AnnounceUrlPath
+
 	server.connectedClients = make(map[protocol.ConnectionId]ConnectedClient)
 
 	// TODO: UDP over IPv4 vs IPv6, the network name has to be changed to "udp4" or "udp6"
@@ -260,14 +265,28 @@ func (server *Server) handleRequest(n int, data []byte, remoteAddr *net.UDPAddr)
 
 		if n > int(protocol.SizeOfRequestHeader+protocol.SizeOfIPv4AnnounceRequest) {
 			// check for BEP 41 as an extension
-			url, err := protocol.ExtractExtensionData(reader)
+			urlData, err := protocol.ExtractExtensionData(reader)
 			if err != nil {
 				logger.Error("Unable to extract extension data", zap.Error(err))
 				return
 			}
 
-			// TODO: do something with the url
-			logger.Debug("Extracted extension data", zap.String("url", url))
+			url, err := protocol.ConvertUrlDataToUrl(urlData)
+			if err != nil {
+				logger.Error("Unable to convert url data to url", zap.Error(err))
+				return
+			}
+
+			if server.AnnounceUrlPath != "" && url.Path != server.AnnounceUrlPath {
+				logger.Warn("Client tried to announce with wrong url path", zap.String("expected", server.AnnounceUrlPath), zap.String("got", url.Path))
+
+				err := server.RespondWithError(remoteAddr, requestHeader.TransactionId, "Invalid URL path")
+				if err != nil {
+					logger.Error("Unable to respond to client with error", zap.Error(err))
+				}
+
+				return
+			}
 		}
 
 		torrent, err := server.GetTorrent(announceRequest.InfoHash)

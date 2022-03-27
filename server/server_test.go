@@ -66,6 +66,7 @@ func TestServer(t *testing.T) {
 
 			return torrent, nil
 		},
+		AnnounceUrlPath: "/announce",
 	}
 
 	serverAddr := &net.UDPAddr{
@@ -185,6 +186,11 @@ func TestServer(t *testing.T) {
 	err = protocol.Unmarshal(reader, &responseHeader)
 	if err != nil {
 		t.Fatalf("Failed to unmarshal announce response header: %v", err)
+	}
+
+	// action should be the same
+	if responseHeader.Action != announceRequestHeader.Action {
+		t.Fatalf("Unexpected announce response action: %v", responseHeader.Action)
 	}
 
 	var announceResponse protocol.IPv4AnnounceResponse
