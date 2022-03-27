@@ -20,13 +20,16 @@ const (
 
 type GetTorrentFunc func(infoHash protocol.InfoHash) (Torrent, error)
 
-type Server struct {
-	Logger           *zap.Logger
-	ConnectedClients map[protocol.ConnectionId]ConnectedClient
-	GetTorrent       GetTorrentFunc
+type IsBannedFunc func(remoteAddr *net.UDPAddr) bool
 
-	conn   *net.UDPConn
-	closed bool
+type Server struct {
+	Logger     *zap.Logger
+	GetTorrent GetTorrentFunc
+	IsBanned   IsBannedFunc
+
+	conn             *net.UDPConn
+	connectedClients map[protocol.ConnectionId]ConnectedClient
+	closed           bool
 }
 
 // Responds to a client with the given data.
@@ -79,7 +82,7 @@ func (server *Server) RegisterNewConnection() protocol.ConnectionId {
 	// connection ids should not be guessable by the client, can look into crypto/rand
 	connectionId := protocol.ConnectionId(rand.Int63())
 
-	server.ConnectedClients[connectionId] = ConnectedClient{
+	server.connectedClients[connectionId] = ConnectedClient{
 		ConnectionId: connectionId,
 		TimeIdIssued: time.Now(),
 	}
@@ -89,18 +92,18 @@ func (server *Server) RegisterNewConnection() protocol.ConnectionId {
 
 // Unregisters a connection.
 func (server *Server) UnregisterConnection(connectionId protocol.ConnectionId) {
-	delete(server.ConnectedClients, connectionId)
+	delete(server.connectedClients, connectionId)
 }
 
 // Checks if the given connection id is valid.
 func (server *Server) IsConnected(connectionId protocol.ConnectionId) bool {
-	_, ok := server.ConnectedClients[connectionId]
+	_, ok := server.connectedClients[connectionId]
 	return ok
 }
 
 // Checks if the connection of the given connection id is valid.
 func (server *Server) IsValidConnection(connectionId protocol.ConnectionId) bool {
-	connection, ok := server.ConnectedClients[connectionId]
+	connection, ok := server.connectedClients[connectionId]
 	if !ok {
 		return false
 	}
@@ -111,7 +114,7 @@ func (server *Server) IsValidConnection(connectionId protocol.ConnectionId) bool
 // Starts the cleanup routine which removes old connections.
 func (server *Server) StartCleanup(sleepTime time.Duration) {
 	for {
-		for _, connection := range server.ConnectedClients {
+		for _, connection := range server.connectedClients {
 			if connection.IsValid() {
 				continue
 			}
@@ -143,6 +146,14 @@ func (server *Server) Listen(addr *net.UDPAddr) (err error) {
 		return fmt.Errorf("GetTorrent function is not set!")
 	}
 
+	if server.IsBanned == nil {
+		server.IsBanned = func(remoteAddr *net.UDPAddr) bool {
+			return false
+		}
+	}
+
+	server.connectedClients = make(map[protocol.ConnectionId]ConnectedClient)
+
 	// TODO: UDP over IPv4 vs IPv6, the network name has to be changed to "udp4" or "udp6"
 	listener, err := net.ListenUDP("udp4", addr)
 	if err != nil {
@@ -151,20 +162,23 @@ func (server *Server) Listen(addr *net.UDPAddr) (err error) {
 	}
 
 	server.conn = listener
-	// called in Server.Close()
-	// defer listener.Close()
 
 	data := make([]byte, blockSize)
 	for {
+		n, remoteAddr, err := listener.ReadFromUDP(data)
+
 		if server.closed {
 			server.Logger.Info("Server closed, stopping listening")
 			return nil
 		}
 
-		n, remoteAddr, err := listener.ReadFromUDP(data)
-
 		if err != nil {
 			server.Logger.Error("Unable to read package", zap.Error(err))
+			continue
+		}
+
+		if server.IsBanned(remoteAddr) {
+			server.Logger.Warn("Banned client tried to send data", zap.String("remote", remoteAddr.String()))
 			continue
 		}
 

@@ -66,7 +66,6 @@ func TestServer(t *testing.T) {
 
 			return torrent, nil
 		},
-		ConnectedClients: make(map[protocol.ConnectionId]ConnectedClient),
 	}
 
 	serverAddr := &net.UDPAddr{

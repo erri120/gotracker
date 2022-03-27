@@ -1,8 +1,9 @@
 package server
 
 import (
-	"erri120/gotracker/protocol"
 	"time"
+
+	"erri120/gotracker/protocol"
 )
 
 type ConnectedClient struct {
