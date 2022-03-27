@@ -155,7 +155,14 @@ func TestServer(t *testing.T) {
 		NumWanted:  10,
 	}
 
-	announceRequestBytes, err := protocol.Marshal(8+4+4+protocol.SizeOfIPv4AnnounceRequest, announceRequestHeader, announceRequest)
+	announceUrl := "/announce"
+	buf := &bytes.Buffer{}
+	buf.WriteByte(byte(0x2))
+	buf.WriteByte(byte(len(announceUrl)))
+	buf.WriteString(announceUrl)
+	urlData := buf.Bytes()
+
+	announceRequestBytes, err := protocol.Marshal(8+4+4+protocol.SizeOfIPv4AnnounceRequest+uint32(len(urlData)), announceRequestHeader, announceRequest, urlData)
 	if err != nil {
 		t.Fatalf("Failed to marshal announce request: %v", err)
 	}
