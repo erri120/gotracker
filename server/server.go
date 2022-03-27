@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"strings"
 	"time"
 
 	"erri120/gotracker/protocol"
@@ -131,8 +132,7 @@ func (server *Server) StartCleanup(sleepTime time.Duration) {
 	}
 }
 
-// Starts the routine which handles incoming messages.
-func (server *Server) Listen(addr *net.UDPAddr) (err error) {
+func (server *Server) validateOptions() error {
 	if server.closed {
 		return fmt.Errorf("Server is closed!")
 	}
@@ -155,9 +155,33 @@ func (server *Server) Listen(addr *net.UDPAddr) (err error) {
 		}
 	}
 
-	// TODO: validate server.AnnounceUrlPath
+	if len(server.AnnounceUrlPath) > 0 {
+		// should starts with /
+		if server.AnnounceUrlPath[0] != '/' {
+			server.AnnounceUrlPath = "/" + server.AnnounceUrlPath
+		}
+
+		// should not end with /
+		if server.AnnounceUrlPath[len(server.AnnounceUrlPath)-1] == '/' {
+			server.AnnounceUrlPath = server.AnnounceUrlPath[:len(server.AnnounceUrlPath)-1]
+		}
+
+		// should not contain a querry
+		if strings.Contains(server.AnnounceUrlPath, "?") {
+			return fmt.Errorf("Announce url path should not contain a querry!")
+		}
+	}
 
 	server.connectedClients = make(map[protocol.ConnectionId]ConnectedClient)
+
+	return nil
+}
+
+// Starts the routine which handles incoming messages.
+func (server *Server) Listen(addr *net.UDPAddr) (err error) {
+	if err := server.validateOptions(); err != nil {
+		return err
+	}
 
 	// TODO: UDP over IPv4 vs IPv6, the network name has to be changed to "udp4" or "udp6"
 	listener, err := net.ListenUDP("udp4", addr)
