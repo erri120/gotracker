@@ -23,13 +23,16 @@ type GetTorrentFunc func(infoHash protocol.InfoHash) (Torrent, error)
 
 type IsBannedFunc func(remoteAddr *net.UDPAddr) bool
 
+type IsValidUrlQueryFunc func(query string) bool
+
 type Server struct {
-	Logger *zap.Logger // Logger to use
+	Logger *zap.Logger // Logger to use.
 
-	AnnounceUrlPath string // Announce url to use
+	AnnounceUrlPath string // Announce url to use. Must start with a '/' and not end with one.
 
-	GetTorrent     GetTorrentFunc // Function to get a torrent by its info hash
-	IsClientBanned IsBannedFunc   // Function to check if a client is banned
+	GetTorrent          GetTorrentFunc      // Function to get a torrent by its info hash.
+	IsClientBanned      IsBannedFunc        // Function to check if a client is banned.
+	IsValidUrlQueryFunc IsValidUrlQueryFunc // Function to check if a url query is valid. Can be used for authentication.
 
 	conn             *net.UDPConn
 	connectedClients map[protocol.ConnectionId]ConnectedClient
@@ -172,6 +175,12 @@ func (server *Server) validateOptions() error {
 		}
 	}
 
+	if server.IsValidUrlQueryFunc == nil {
+		server.IsValidUrlQueryFunc = func(query string) bool {
+			return true
+		}
+	}
+
 	server.connectedClients = make(map[protocol.ConnectionId]ConnectedClient)
 
 	return nil
@@ -305,6 +314,17 @@ func (server *Server) handleRequest(n int, data []byte, remoteAddr *net.UDPAddr)
 				logger.Warn("Client tried to announce with wrong url path", zap.String("expected", server.AnnounceUrlPath), zap.String("got", url.Path))
 
 				err := server.RespondWithError(remoteAddr, requestHeader.TransactionId, "Invalid URL path")
+				if err != nil {
+					logger.Error("Unable to respond to client with error", zap.Error(err))
+				}
+
+				return
+			}
+
+			if !server.IsValidUrlQueryFunc(url.RawQuery) {
+				logger.Warn("Client tried to announce with wrong url query", zap.String("query", url.RawQuery))
+
+				err := server.RespondWithError(remoteAddr, requestHeader.TransactionId, "Invalid URL query")
 				if err != nil {
 					logger.Error("Unable to respond to client with error", zap.Error(err))
 				}

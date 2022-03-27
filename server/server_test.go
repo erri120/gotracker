@@ -5,6 +5,7 @@ import (
 	"erri120/gotracker/protocol"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"testing"
 	"time"
@@ -67,6 +68,17 @@ func TestServer(t *testing.T) {
 			return torrent, nil
 		},
 		AnnounceUrlPath: "/announce",
+		IsClientBanned: func(remoteAddr *net.UDPAddr) bool {
+			return false
+		},
+		IsValidUrlQueryFunc: func(queryString string) bool {
+			query, err := url.ParseQuery(queryString)
+			if err != nil {
+				return false
+			}
+
+			return query.Get("key") == "12345"
+		},
 	}
 
 	serverAddr := &net.UDPAddr{
@@ -156,7 +168,7 @@ func TestServer(t *testing.T) {
 		NumWanted:  10,
 	}
 
-	announceUrl := "/announce"
+	announceUrl := "/announce?key=12345"
 	buf := &bytes.Buffer{}
 	buf.WriteByte(byte(0x2))
 	buf.WriteByte(byte(len(announceUrl)))
