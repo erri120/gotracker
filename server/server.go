@@ -23,9 +23,9 @@ type GetTorrentFunc func(infoHash protocol.InfoHash) (Torrent, error)
 type IsBannedFunc func(remoteAddr *net.UDPAddr) bool
 
 type Server struct {
-	Logger     *zap.Logger
-	GetTorrent GetTorrentFunc
-	IsBanned   IsBannedFunc
+	Logger         *zap.Logger
+	GetTorrent     GetTorrentFunc
+	IsClientBanned IsBannedFunc
 
 	conn             *net.UDPConn
 	connectedClients map[protocol.ConnectionId]ConnectedClient
@@ -146,8 +146,8 @@ func (server *Server) Listen(addr *net.UDPAddr) (err error) {
 		return fmt.Errorf("GetTorrent function is not set!")
 	}
 
-	if server.IsBanned == nil {
-		server.IsBanned = func(remoteAddr *net.UDPAddr) bool {
+	if server.IsClientBanned == nil {
+		server.IsClientBanned = func(remoteAddr *net.UDPAddr) bool {
 			return false
 		}
 	}
@@ -177,23 +177,22 @@ func (server *Server) Listen(addr *net.UDPAddr) (err error) {
 			continue
 		}
 
-		if server.IsBanned(remoteAddr) {
-			server.Logger.Warn("Banned client tried to send data", zap.String("remote", remoteAddr.String()))
-			continue
-		}
-
 		if n < int(protocol.SizeOfRequestHeader) {
 			server.Logger.Error("Received package is too small", zap.Int("bytes", n))
 			continue
 		}
 
-		reader := bytes.NewReader(data[:n])
-		go server.handleRequest(reader, remoteAddr)
+		go server.handleRequest(n, data[:n], remoteAddr)
 	}
 }
 
-func (server *Server) handleRequest(reader *bytes.Reader, remoteAddr *net.UDPAddr) {
-	n := reader.Len()
+func (server *Server) handleRequest(n int, data []byte, remoteAddr *net.UDPAddr) {
+	if server.IsClientBanned(remoteAddr) {
+		server.Logger.Warn("Banned client tried to send data", zap.String("remote", remoteAddr.String()))
+		return
+	}
+
+	reader := bytes.NewReader(data)
 
 	var requestHeader protocol.RequestHeader
 	if err := protocol.Unmarshal(reader, &requestHeader); err != nil {
